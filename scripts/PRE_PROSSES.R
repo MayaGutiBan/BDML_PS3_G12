@@ -47,21 +47,25 @@ limpiar_y_enriquecer <- function(df) {
       bathrooms = if_else(is.na(bathrooms), baños, bathrooms)
     ) %>%
     
-    # Extracción de área construida
+    # Extracción de área construida y asignación a surface
     mutate(
-      area_raw = str_extract(description, "\\d+\\s*(m2|mts|metros)?\\s*(construida|construidos)?"),
-      area_construida = str_extract(area_raw, "\\d+") %>% as.integer(),
+      area_matches = str_extract_all(description, pattern_context),
+      area_nums = map(area_matches, ~ {
+        nums <- str_extract_all(.x, "\\d{1,4}") %>% unlist() %>% as.integer()
+        nums[!is.na(nums) & nums >= 20 & nums <= 1000]
+      }),
+      area_construida = map_int(area_nums, ~ if(length(.x) > 0) max(.x) else NA_integer_),
       surface_covered = if_else(is.na(surface_covered), area_construida, surface_covered),
       surface_total = if_else(is.na(surface_total), area_construida, surface_total)
     ) %>%
     
     # Extracción de metros de terraza
     mutate(
-      terraza_raw = str_extract(description, "\\d+\\s*(m2|mts|metros)?\\s*(de\\s)?terraza"),
+      terraza_raw = str_extract(description, "(de\\s+)?terraza|patio|balcon\\s+\\d+\\s*(m2|mts|metros)?"),
       m2_terraza = str_extract(terraza_raw, "\\d+") %>% as.integer()
     ) %>%
     
-    # Ajuste de surface_total si está NA
+    # Ajuste final de surface_total si aún está NA
     mutate(
       surface_total = if_else(
         is.na(surface_total) & !is.na(surface_covered),
@@ -71,7 +75,7 @@ limpiar_y_enriquecer <- function(df) {
     ) %>%
     
     # Eliminación de columnas auxiliares
-    select(-alcoba_raw, -alcobas, -baño_raw, -baños, -area_raw, -area_construida, terraza_raw)
+    select(-alcoba_raw, -alcobas, -baño_raw, -baños, -area_construida, -terraza_raw, -m2_terraza)
   
   return(df)
 }
