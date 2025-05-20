@@ -42,7 +42,7 @@ limpiar_y_enriquecer <- function(df) {
     
     # Extracción de número de baños
     mutate(
-      baño_raw = str_extract(description, "\\d+\\s*(baños?|baño)"),
+      baño_raw = str_extract(description, "\\d+\\s*(baños?|baño|banos|bano)"),
       baños = str_extract(baño_raw, "\\d+") %>% as.integer(),
       bathrooms = if_else(is.na(bathrooms), baños, bathrooms)
     ) %>%
@@ -55,8 +55,23 @@ limpiar_y_enriquecer <- function(df) {
       surface_total = if_else(is.na(surface_total), area_construida, surface_total)
     ) %>%
     
-    # Eliminamos columnas auxiliares
-    select(-alcoba_raw, -alcobas, -baño_raw, -baños, -area_raw, -area_construida)
+    # Extracción de metros de terraza
+    mutate(
+      terraza_raw = str_extract(description, "\\d+\\s*(m2|mts|metros)?\\s*(de\\s)?terraza"),
+      m2_terraza = str_extract(terraza_raw, "\\d+") %>% as.integer()
+    ) %>%
+    
+    # Ajuste de surface_total si está NA
+    mutate(
+      surface_total = if_else(
+        is.na(surface_total) & !is.na(surface_covered),
+        surface_covered + coalesce(m2_terraza, 0),
+        surface_total
+      )
+    ) %>%
+    
+    # Eliminación de columnas auxiliares
+    select(-alcoba_raw, -alcobas, -baño_raw, -baños, -area_raw, -area_construida, terraza_raw)
   
   return(df)
 }
