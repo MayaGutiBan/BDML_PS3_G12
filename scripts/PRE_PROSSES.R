@@ -15,7 +15,6 @@ p_load(rio, ## read datasets
 ) 
 
 ### Pasar de texto a datos 
-
 limpiar_y_enriquecer <- function(df) {
   df <- df %>%
     # Limpieza del texto
@@ -52,12 +51,12 @@ limpiar_y_enriquecer <- function(df) {
       area_matches = str_extract_all(description, pattern_context),
       area_nums = map(area_matches, ~ {
         nums <- str_extract_all(.x, "\\d{1,4}") %>% unlist() %>% as.integer()
-        nums[!is.na(nums) & nums >= 20 & nums <= 1000]
+        nums[!is.na(nums) & nums >= 30 & nums <= 1000]
       }),
       area_construida = map_int(area_nums, ~ if(length(.x) > 0) max(.x) else NA_integer_),
       surface_covered = if_else(is.na(surface_covered), area_construida, surface_covered),
       surface_total = if_else(is.na(surface_total), area_construida, surface_total)
-    ) %>%
+    )%>%
     
     # Extracción de metros de terraza
     mutate(
@@ -80,5 +79,11 @@ limpiar_y_enriquecer <- function(df) {
   return(df)
 }
 
+
 train <- limpiar_y_enriquecer(train)
 test <- limpiar_y_enriquecer(test)
+
+
+
+p_load( visdat)
+vis_dat(train)
