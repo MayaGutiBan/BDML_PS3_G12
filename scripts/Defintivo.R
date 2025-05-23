@@ -268,3 +268,10 @@ train <- train %>% select(-bathrooms_imp,-rooms_imp,-surface_covered_imp,-surfac
 
 write.csv(train, "train_clean.csv", row.names = FALSE)
 
+
+#----------------------------------
+# 6. Eliminación de outliers 
+#----------------------------------
+
+      
+
