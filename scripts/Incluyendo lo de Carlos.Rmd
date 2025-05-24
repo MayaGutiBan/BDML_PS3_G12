@@ -1,0 +1,1711 @@
+---
+title: "Solución Taller No. 3"
+author: "Sebastián"
+date: "2025-05-20"
+output: html_document
+---
+
+```{r}
+if(!require(pacman)) install.packages("pacman") ; require(pacman)
+if(!require(janitor)) install.packages("janitor") ; require(janitor)
+if(!require(readxl)) install.packages("readxl") ; require(readxl)
+if(!require(writexl)) install.packages("writexl") ; require(writexl)
+if(!require(sf)) install.packages("sf") ; require(sf)
+if(!require(geojsonio)) install.packages("geojsonio") ; require(geojsonio)
+if(!require(GGally)) install.packages("GGally") ; require(GGally)
+if(!require(leaflet)) install.packages("leaflet") ; require(leaflet)
+if(!require(VIM)) install.packages("VIM") ; require(VIM)
+if(!require(stringr)) install.packages("stringr") ; require(stringr)
+if(!require(readr)) install.packages("readr") ; require(readr)
+if(!require(osmdata)) install.packages("osmdata") ; require(osmdata)
+
+if(!require(jsonlite)) install.packages("jsonlite") ; require(jsonlite) #No
+if(!require(rvest)) install.packages("rvest") ; require(rvest) #No
+if(!require(httr)) install.packages("httr") ; require(httr) #No
+
+p_load(rio, # import/export data
+       tidyverse, # Manipular dataframes
+       glmnet, # To implement regularization algorithms. 
+       caret, # Creating predictive models
+       scatterplot3d, # For 3D visualization
+       plotly, # For interactive 3D plots
+       skimr, #sumary data
+       gridExtra, #visualizaing missing data
+       corrplot, #correlation PLots
+       stargazer, #tables/outpot to TEX
+       MASS, #Various statistcal functions
+       readxl,
+       readr,
+       writexl,
+       stringi, #Manipular cadenas de texto
+       tm,  # Para text mining
+       tidytext,  #Para tokenización
+       stopwords,  #consultar stopwords
+       tidymodels, #modelos de machine learning
+       sf, # leer/escribir/manipular datos espaciales
+       spatialsample,  #Validación cruzada espacial
+       janitor, 
+       leaflet, # Mapas interactivos
+       VIM,  # Imputar por Vercino más cercano (KNN)
+       ggcorrplot,
+       janitor,
+       jsonlite,
+       httr,
+       plotly, # Gráficos interactivos
+)
+```
+
+
+# -----------------------------------------------------------------------------------------------------------------------------
+# 1. Cargando base de datos
+# -----------------------------------------------------------------------------------------------------------------------------
+```{r}
+library(readr)
+
+test <- read.csv("https://raw.githubusercontent.com/Jusebastru/Probelm_Set_3/refs/heads/main/test.csv", 
+                 sep = ",", 
+                 stringsAsFactors = TRUE)
+
+train <- read.csv("https://raw.githubusercontent.com/Jusebastru/Probelm_Set_3/refs/heads/main/train.csv", 
+                  sep = ",", 
+                  stringsAsFactors = TRUE)
+
+sumission <- read.csv("https://raw.githubusercontent.com/Jusebastru/Probelm_Set_3/refs/heads/main/submission_template.csv", 
+                      sep = ",", 
+                      stringsAsFactors = TRUE)
+
+#####################  6.2.1. Se descarga dede https://github.com/Jusebastru/Probelm_Set_3/blob/main/upz-bogota.xlsx 
+
+upz_bogota <- st_read("C:/Users/Juancho/OneDrive/Desktop/MeCA/Big Data y Maching Learning/Taller No. 3./upz-bogota.geojson",
+                      quiet = TRUE)
+
+```
+
+Inicialmente, cargamos las bases de datos del Problem Set No. 3. Incluimos una cuarta base de datos, las Unidades de Planeamiento Zonal (UPZ) de Bogotá D.C. Las UPZ se pueden definir como territorios que concentran algunos barrios dentro de las localidades y permiten planificar el desarrollo urbano a un nivel zonal. Para nuestro ejercicio, se descargó el formato .Geojson de la página web: https://bogota-laburbano.opendatasoft.com/explore/dataset/upz-bogota/export/, la cual se cargó al repositorio Github.
+
+# -----------------------------------------------------------------------------------------------------------------------------
+# 2. Función para variables decriptivas
+# -----------------------------------------------------------------------------------------------------------------------------
+```{r}
+
+###########################################    2.1 Pasar de texto a datos 
+
+limpiar_y_enriquecer <- function(df) {
+  df <- df %>%
+    # Limpieza del texto
+    mutate(description = str_to_lower(description)) %>%
+    mutate(description = stringi::stri_trans_general(description, "Latin-ASCII")) %>%
+    mutate(description = str_replace_all(description, "[^[:alnum:]]", " ")) %>%
+    mutate(description = str_trim(gsub("\\s+", " ", description))) %>%
+    
+    # Inferencia del tipo de propiedad
+    mutate(property_type_2 = ifelse(grepl("casa", description), "Casa", property_type)) %>%
+    mutate(property_type_2 = ifelse(grepl("apto|apartamento", description), "Apartamento", property_type_2)) %>%
+    
+    # Extracción de número de alcobas
+    mutate(
+      alcoba_raw = str_extract(description, "\\d+\\s*(alcobas?|cuartos?|habitaciones?)"),
+      alcobas = str_extract(alcoba_raw, "\\d+") %>% as.integer(),
+      bedrooms = if_else(is.na(bedrooms), alcobas, bedrooms)
+    ) %>%
+    
+    # Extracción de si tiene terraza
+    mutate(
+      tiene_terraza = if_else(str_detect(description, regex("terraza", ignore_case = TRUE)), 1, 0)
+    ) %>%
+    
+    # Extracción de número de baños
+    mutate(
+      baño_raw = str_extract(description, "\\d+\\s*(baños?|baño|banos|bano)"),
+      baños = str_extract(baño_raw, "\\d+") %>% as.integer(),
+      bathrooms = if_else(is.na(bathrooms), baños, bathrooms)
+    ) %>%
+    
+    # Extracción de área construida y asignación a surface
+    mutate(
+      area_matches = str_extract_all(description,  "\\d+\\s*(salón?|saln|salon)"),
+      area_nums = map(area_matches, ~ {
+        nums <- str_extract_all(.x, "\\d{1,4}") %>% unlist() %>% as.integer()
+        nums[!is.na(nums) & nums >= 20 & nums <= 1000]
+      }),
+      area_construida = map_int(area_nums, ~ if(length(.x) > 0) max(.x) else NA_integer_),
+      surface_covered = if_else(is.na(surface_covered), area_construida, surface_covered),
+      surface_total = if_else(is.na(surface_total), area_construida, surface_total)
+    ) %>%
+    
+    # Extracción de metros de terraza
+    mutate(
+      terraza_raw = str_extract(description, "(de\\s+)?terraza|patio|balcon\\s+\\d+\\s*(m2|mts|metros)?"),
+      m2_terraza = str_extract(terraza_raw, "\\d+") %>% as.integer()
+    ) %>%
+    
+    # Ajuste final de surface_total si aún está NA
+    mutate(
+      surface_total = if_else(
+        is.na(surface_total) & !is.na(surface_covered),
+        surface_covered + coalesce(m2_terraza, 0),
+        surface_total
+      )
+    ) %>%
+    
+    # Eliminación de columnas auxiliares
+    dplyr::select(-alcoba_raw, -alcobas, -baño_raw, -baños, -area_construida, -terraza_raw, -m2_terraza)
+  
+  return(df)
+}
+
+train <- limpiar_y_enriquecer(train)
+test <- limpiar_y_enriquecer(test)
+```
+
+###### 2.1. Visualizando valores
+
+De las base "test" podemos observar que está compuestas por 10286 observaciones (filas) con 20 variables. Aplicando el argumento glimpse(), además de visualizar la tipología de cada variable, se observa que las variables "price", "surface_total", "surface_covered", "bathrooms" y "rooms" contienen missing_values. Para verificar la cantidad de missing_values aplicamos el argumento skim(), donde podemos observar que la variable "price" no aparece precisamente porque su tipología es de carácter <lgl>, es decir, es una variable que contiene datos de tipo lógico/booleanos que se emplean para representar condiciones, resultados de comparaciones, o cualquier situación que requiera una respuesta de sí/no o verdadero/falso. En cuanto las demás variables con missing_values, podemos ver que "surface_covered" es la más crítica, pues  le hacen falta el 72% de las observaciones, seguida con el 66% de "surface_total", 45% de "rooms" y 16% de "bathrooms".
+
+```{r}
+glimpse(test)
+skimr::skim(test)
+visdat::vis_dat(test)
+visdat::vis_miss(test)
+```
+
+De la base "train" podemos observar que está compuesta por 38644 observaciones con 20 variables. Aplicando el argumento glimpse(), se observa que las variables "surface_total", "surface_covered", "rooms" y "bathrooms" cuentan missing_values. A diferencia de la base "test", en "trains" la variable "price" es de tipo doble precisión, es decir, valores numéricos con decimales. Con el argumento skim(), observamos que nuevamente la variable "surface_covered" contiene la mayor cantidad de missing_values, seguido por "surface_total". La variable "bathrooms" contiene la menor cantidad de missing_values. 
+
+Apesar de emplear una estrategia de extracción de información en "desripcion", sigue habiendo una gran cantidad de missing_values. Por ende, se hace necesario en pensar un mecanismo que permita imputar estos valores lo más próximo (preciso) posible. 
+
+```{r}
+glimpse(train)
+skimr::skim(train)
+visdat::vis_dat(train)
+```
+
+# ----------------------------------------------------------------------------------------------------------------------------
+# 3. Función para variables espaciales
+# ----------------------------------------------------------------------------------------------------------------------------
+
+Con la finalidad de lograr obtener un buen modelo, se incluyen variables de distancia a restaurantes, hospitales, parques, CAI's de policía, estaciones de transmilenio. En lo cotidiano, cuando se piensa en arrendar o comprar un inmueble, se piensa en la proximidad este tipo de lugares por salud, entretenimiento, seguridad y movilidad. En cuanto mejor esté ubicado el inmueble a estos lugares, se podría intuír que más alto será el precio de venta, compra u/o arriendo.
+
+```{r}
+
+###########################################    3.1 Restaurantes, Hospitales y Parques
+
+# SOLUCIÓN 1: Reinstalar el paquete curl
+install.packages("curl", dependencies = TRUE)
+
+# SOLUCIÓN 2: Actualizar todos los paquetes involucrados
+install.packages(c("curl", "osmdata", "sf", "dplyr"), dependencies = TRUE)
+
+# SOLUCIÓN 3: Función corregida con manejo de errores y dependencias explícitas
+
+agregar_vars_espaciales <- function(sf_data, ciudad = "Bogotá Colombia", Walkingdistance = 700) {
+  # Cargar y verificar las bibliotecas necesarias
+  required_packages <- c("dplyr", "sf", "osmdata", "curl")
+  
+  # Verificar e instalar paquetes faltantes
+  for(pkg in required_packages) {
+    if(!requireNamespace(pkg, quietly = TRUE)) {
+      message(paste("Instalando paquete:", pkg))
+      install.packages(pkg)
+    }
+    library(pkg, character.only = TRUE)
+  }
+  
+  # Verificar que sf_data sea un objeto sf
+  if(!inherits(sf_data, "sf")) {
+    stop("El objeto proporcionado no es de clase sf")
+  }
+  
+  tryCatch({
+    message("Usando bbox de: ", ciudad)
+    bbox <- osmdata::getbb(ciudad)
+    
+    # Asegurarse que el bbox es válido
+    if(is.null(bbox) || any(is.na(bbox))) {
+      stop("No se pudo obtener un bbox válido para la ciudad especificada")
+    }
+    
+    #### Parques ####
+    message("Obteniendo datos de parques...")
+    parques <- opq(bbox = bbox) %>%
+      add_osm_feature(key = "leisure", value = "park")
+    
+    parques_sf <- osmdata_sf(parques)
+    
+    # Verificar que se obtuvieron polígonos de parques
+    if(is.null(parques_sf$osm_polygons) || nrow(parques_sf$osm_polygons) == 0) {
+      warning("No se encontraron parques en la zona especificada")
+      sf_data$distancia_parque <- NA
+    } else {
+      parques_poligonos <- parques_sf$osm_polygons %>% st_as_sf()
+      centroides_parques <- st_centroid(parques_poligonos) %>%
+        mutate(x = st_coordinates(.)[, "X"], y = st_coordinates(.)[, "Y"]) %>%
+        st_as_sf(coords = c("x", "y"), crs = 4326)
+      
+      # Distancia a parque más cercano
+      dist_matrix <- st_distance(sf_data, centroides_parques)
+      sf_data$distancia_parque <- apply(dist_matrix, 1, min)
+    }
+    
+    #### Hospitales ####
+    message("Obteniendo datos de hospitales...")
+    hospitales <- opq(bbox = bbox) %>%
+      add_osm_feature(key = "amenity", value = "hospital")
+    
+    hospitales_sf <- osmdata_sf(hospitales)
+    
+    # Verificar que se obtuvieron polígonos de hospitales
+    if(is.null(hospitales_sf$osm_polygons) || nrow(hospitales_sf$osm_polygons) == 0) {
+      warning("No se encontraron hospitales en la zona especificada")
+      sf_data$distancia_hospital <- NA
+    } else {
+      hospitales_poligonos <- hospitales_sf$osm_polygons %>% st_as_sf()
+      centroides_hosp <- st_centroid(hospitales_poligonos) %>%
+        mutate(x = st_coordinates(.)[, "X"], y = st_coordinates(.)[, "Y"]) %>%
+        st_as_sf(coords = c("x", "y"), crs = 4326)
+      
+      dist_matrix_hosp <- st_distance(sf_data, centroides_hosp)
+      sf_data$distancia_hospital <- apply(dist_matrix_hosp, 1, min)
+    }
+    
+    #### Restaurantes ####
+    message("Obteniendo datos de restaurantes...")
+    restaurantes <- opq(bbox = bbox) %>%
+      add_osm_feature(key = "amenity", value = "restaurant")
+    
+    restaurantes_sf <- osmdata_sf(restaurantes)
+    
+    # Verificar que se obtuvieron datos de restaurantes
+    if((is.null(restaurantes_sf$osm_points) || nrow(restaurantes_sf$osm_points) == 0) && 
+       (is.null(restaurantes_sf$osm_polygons) || nrow(restaurantes_sf$osm_polygons) == 0)) {
+      warning("No se encontraron restaurantes en la zona especificada")
+      sf_data$num_restaurantes_700m <- 0
+    } else {
+      # Unir puntos y centroides de polígonos
+      puntos <- if(!is.null(restaurantes_sf$osm_points)) {
+        restaurantes_sf$osm_points %>% dplyr::select(osm_id, geometry)
+      } else {
+        st_sf(osm_id = character(0), geometry = st_sfc(), crs = 4326)
+      }
+      
+      poligonos <- if(!is.null(restaurantes_sf$osm_polygons)) {
+        restaurantes_sf$osm_polygons %>%
+          dplyr::select(osm_id, geometry) %>%
+          st_centroid()
+      } else {
+        st_sf(osm_id = character(0), geometry = st_sfc(), crs = 4326)
+      }
+      
+      restaurantes_all <- bind_rows(puntos, poligonos) %>%
+        st_transform(4326)
+      
+      # Restaurantes en radio
+      if(nrow(restaurantes_all) > 0) {
+        restaurantes_cercanos <- st_is_within_distance(sf_data, restaurantes_all, dist = Walkingdistance)
+        sf_data$num_restaurantes_700m <- lengths(restaurantes_cercanos)
+      } else {
+        sf_data$num_restaurantes_700m <- 0
+      }
+    }
+    
+    message("Proceso completado con éxito")
+    return(sf_data)
+    
+  }, error = function(e) {
+    # Manejo específico para el error de curl_parse_url
+    if(grepl("curl_parse_url", e$message)) {
+      message("Error detectado con curl_parse_url. Intentando reinstalar curl...")
+      try(detach("package:curl", unload = TRUE), silent = TRUE)
+      try(detach("package:osmdata", unload = TRUE), silent = TRUE)
+      install.packages("curl", dependencies = TRUE)
+      library(curl)
+      message("Por favor, intente ejecutar la función nuevamente.")
+    } else {
+      message("Error en la función agregar_vars_espaciales: ", e$message)
+    }
+    # Devolver los datos originales si hay error
+    return(sf_data)
+  })
+}
+```
+
+```{r}
+###########################################    3.1.1. Aplicar función
+
+# Convertir datos de puntos a objeto espacial con CRS compatible
+train_sf <- train %>%
+  st_as_sf(coords = c("lon", "lat"), crs = 4326)  # Sistema WGS84
+
+test_sf <- test %>%
+  st_as_sf(coords = c("lon", "lat"), crs = 4326)  # Sistema WGS84
+
+
+train_sf <- agregar_vars_espaciales(train_sf)
+test_sf <- agregar_vars_espaciales(test_sf)
+```
+
+```{r}
+
+###########################################    3.2. Estaciones TM y CAIs
+
+# Función para añadir flags de proximidad
+add_proximity_flags <- function(properties_sf,
+                                tm_geojson = "https://raw.githubusercontent.com/Jusebastru/Probelm_Set_3/refs/heads/main/Estaciones_Troncales_TM.geojson",
+                                cai_geojson = "https://datosabiertos.bogota.gov.co/dataset/bcc51101-762b-4e13-9455-f77502c75a0f/resource/202c5810-6880-43f8-b801-df70aaf6d237/download/comandoatencioninmediata.geojson",
+                                dist_threshold = 1000) {
+  
+  # 1. Leer capas
+  tm_sf  <- st_read(tm_geojson, quiet = TRUE)
+  cai_sf <- st_read(cai_geojson, quiet = TRUE)
+  
+  # 2. Transformar CRS para que coincida con properties_sf
+  tm_sf  <- st_transform(tm_sf,  st_crs(properties_sf))
+  cai_sf <- st_transform(cai_sf, st_crs(properties_sf))
+  
+  # 3. Calcular matriz de distancias
+  d_tm  <- st_distance(properties_sf, tm_sf)   # [n_prop x n_tm]
+  d_cai <- st_distance(properties_sf, cai_sf)  # [n_prop x n_cai]
+  
+  # 4. Distancia mínima por vivienda
+  min_dist_tm  <- apply(d_tm,  1, min)
+  min_dist_cai <- apply(d_cai, 1, min)
+  
+  # 5. Añadir columnas lógicas (TRUE si está a ≤ dist_threshold metros)
+  properties_sf %>%
+    mutate(
+      dist_to_tm  = as.numeric(min_dist_tm),
+      near_tm     = dist_to_tm  <= dist_threshold,
+      dist_to_cai = as.numeric(min_dist_cai),
+      near_cai    = dist_to_cai <= dist_threshold
+    )
+}
+```
+
+```{r}
+###########################################    3.2.1 Aplicar función 
+
+train_sf <- add_proximity_flags(train_sf)
+test_sf <- add_proximity_flags(test_sf)
+
+```
+
+# -----------------------------------------------------------------------------------------------------------------------------
+# 4. Uniendo Bases de Datos
+# -----------------------------------------------------------------------------------------------------------------------------
+
+####### 4.1. Uniendo Bases de datos
+```{r}
+
+##################################### 4.1. Primero identifico cada base con columna de mismo nombre
+
+test_sf$origen <- "test"
+train_sf$origen <- "train"
+
+##################################### 4.2. Uniendo Bases de datos Train_sf y test_Sf 
+
+test_sfyS <- inner_join(test_sf, sumission, by = "property_id")
+Base <- bind_rows(test_sfyS, train_sf)
+
+visdat::vis_miss(Base, warn_large_data = FALSE)
+
+#################################### 4.3. Creando Columna PrecioUnificado
+###                                       PrecioUnificado es la unión de precios en una sola columna
+
+Base <- Base %>%
+  mutate(PrecioUnificado = coalesce(price,price.y))
+
+##################################  4.4.  Eliminando columnas que no interesan #
+Base <- Base %>%
+  dplyr::select(-price.x)
+
+```
+
+###### 4.2. Deflantando Precios a año base 2019
+
+Los precios de las viviendas varían con el paso de los años, aumentan de acuerdo a la inflación y a otros aspectos. Para nuestro ejercicio, consideraremos que la inflación es la de mayor impacto. Por ende, vamos a deflactar los precios a año base 2019. 
+
+```{r}
+
+################# Creo la columna 'IVPHistorico' y según el año le asigno el valor de índice Valorización Predial (IVP) #
+################# Datos de IVP Histórico tomados de: https://epicainmobiliaria.com/cuanto-valoriza-inmueble-colombia/ #
+
+Base <- Base %>%
+  mutate(IVPHistorico = case_when(
+    year == 2019 ~ 1,
+    year == 2020 ~ 1.091,
+    year == 2021 ~ 1.0623,
+    TRUE ~ NA_real_  # Para años distintos asigna NA
+  ))
+
+################## Creo columna InflacionAcumulada para deflactar precios a año base 2019 #
+Base <- Base %>%
+  mutate(InflacionAcumulada = case_when(
+    year == 2019 ~ 1,
+    year == 2020 ~ 1 * 1.091,
+    year == 2021 ~ 1.091 * 1.0623,
+    TRUE ~ NA_real_
+  ))
+
+################## Creo columna de Precios Deflactados llamada PrecioBase #
+Base <- Base %>%
+  mutate(
+    PrecioDeflactado = PrecioUnificado*InflacionAcumulada
+  )
+
+```
+
+```{r}
+
+# Dejamos en un solo CRS
+upz_bogota <- st_transform(upz_bogota, crs = 4326)
+Base <- st_transform(Base, crs = 4326)
+
+# Hacemos un Spatial join: asignar a cada punto la UPZ en la que cae
+#    st_within asegura que sólo se unan cuando el punto quede dentro de un polígono
+
+Base_Bogota <- st_join(
+  x = Base,
+  y = upz_bogota,
+  join = st_within,
+  left = TRUE
+)
+
+# Eliminamos columnas
+Base_Bogota <- Base_Bogota %>%
+  dplyr::select(-operation_type,
+                -property_type_2,
+                -area_matches,
+                -area_nums,
+                -price.y,
+                -price,
+                -objectid,
+                -zona_estacionamiento,
+                -decreto_pot,
+                -decreto,
+                -shape_area,
+                -shape_len,
+                -escala_captura,
+                -fecha_captura,
+                -globalid,
+                -responsable
+                )
+st_write(Base_Bogota, "C:/Users/Juancho/OneDrive/Desktop/MeCA/Big Data y Maching Learning/Taller No. 3/Base_Bogota.geojson", delete_dsn = TRUE)
+```
+
+
+
+# -----------------------------------------------------------------------------------------------------------------------------
+# 5.                                                  Imputando Missing_Values
+# ----------------------------------------------------------------------------------------------------------------------------
+
+"surface_covered" sigue siendo la variable con más missing_values, seguido por "surface_total". Teniendo variables como codigo_upz, localidad, distancia a transmilenio, distancia a CAI's, distancia a hospitales, distancia a parques, podemos hacer más especifico una imputación. Una metodología para imputar missing_values podría ser la moda o, incluso mejor, la mediana de cada variable. Es decir, emplear un método de imputación univariante. Sin embargo, imputar por estos valores podría generar un sesgo de información al atribuir un valor estándar que no está relacionado a las demás características de la vivienda, generando así predicciones sobreajustadas o subajustadas. Por ello, se piensa en emplear una metodología de imputación multivariante que tenga en cuenta las demás variables de las viviendas y que haga más precisa la asignación de valores faltantes. 
+
+# IMputación K- Vecinos más cercanos (KNN)
+
+Es uno de los métodos de imputación multivariante más eficaces. Funciona encontrando los "vecinos más cercanos" (filas) que presentan patrones similares a la fila con datos faltantes. Estos vecinos se utilizan para calcular los valores faltantes. Esta técnica se basa en el algoritmo KNN , un algoritmo comúnmente utilizado en aprendizaje automático para clasificación y regresión.
+
+En la imputación KNN:
+
+- Cada fila se trata como una coordenada en un espacio multidimensional (cada columna representa una dimensión).
+- El algoritmo calcula la distancia entre filas para identificar las más similares.
+- Luego, se estima el valor faltante basándose en los valores de las filas más cercanas.
+
+# Uso de la distancia en la imputación KNN
+
+KNN suele utilizar la distancia euclidiana para medir la similitud entre filas. Por ejemplo, en un espacio de cuatro dimensiones:
+
+- Cada fila puede considerarse como un punto en el espacio.
+- La distancia entre dos puntos (filas) se calcula utilizando sus coordenadas (valores en columnas).
+- Los puntos más cercanos (filas) indican similitud y esas filas se utilizan para estimar el valor faltante.
+
+Hay dos formas principales de calcular la influencia de cada vecino:
+
+- Pesos uniformes : cada vecino tiene una influencia igual.
+- Ponderaciones basadas en la distancia : Los vecinos más cercanos tienen mayor influencia. Por ejemplo, un vecino a una distancia de 5 tendrá mayor impacto que uno a una distancia de 10.
+
+# Ventajas y desventajas de la imputación KNN
+
+##Ventajas:
+
+1. Precisión : KNN a menudo proporciona resultados más precisos que métodos más simples como la imputación de media o mediana, especialmente para conjuntos de datos complejos.
+
+2. Utiliza múltiples columnas : dado que KNN considera otras características, puede capturar mejor patrones y correlaciones en los datos.
+
+## Desventajas:
+
+1. Computacionalmente costoso : KNN requiere cálculos de distancia, que pueden ser lentos para conjuntos de datos grandes.
+
+2. Uso intensivo de memoria : almacena todo el conjunto de entrenamiento para identificar vecinos, lo que puede utilizar mucha memoria.
+
+######                 5.1. Visualizando los missing_values y caracteristicas de las variables
+```{r}
+skimr::skim(Base_Bogota)
+glimpse(Base_Bogota)
+```
+
+#####                                           5.2. Conviertiendo a variables tipo factor
+```{r}
+Base_Bogota$codigo_upz <- as.factor(Base_Bogota$codigo_upz)
+Base_Bogota$codigo_localidad <- as.factor(Base_Bogota$codigo_localidad)
+                                    
+```
+
+######                                      5.3. Función de imputación por KNN (K-Vecino Mäs Cercano)
+```{r}
+
+library(VIM)
+
+# Función para imputar missing values por k-Nearest Neighbors
+impute_knn <- function(df,
+                       vars_objetivo    = c("bathrooms", "bedrooms", "rooms",
+                                          "surface_covered", "surface_total"),
+                       vars_base = c("bathrooms", "bedrooms", "rooms",
+                                          "surface_covered", "surface_total",
+                                          "tiene_terraza", "distancia_parque",
+                                          "distancia_hospital", "num_restaurantes_700m",
+                                          "dist_to_tm", "dist_to_cai", "PrecioDeflactado","codigo_upz"),
+                       k = 5) {
+  
+  # 1. Subconjunto con las variables de interés
+  df_imp <- df %>%
+    dplyr::select(all_of(unique(c(vars_objetivo, vars_base))))
+  
+  # 2. Ejecutar kNN de VIM
+  #    - variable: las columnas a imputar
+  #    - dist_var: variables usadas para calcular distancias
+  #    - k: número de vecinos
+  #    - imp_var = FALSE: no generar columnas indicadores de imputación
+  imputed_block <- kNN(df_imp,
+                       variable = vars_objetivo,
+                       dist_var = vars_base,
+                       k = k,
+                       imp_var = FALSE)
+  
+  # 3. Reemplazar sólo las columnas imputadas en el df original
+  df2 <- df
+  df2[vars_objetivo] <- imputed_block[vars_base]
+  
+  return(df2)
+}
+
+```
+
+######                                              5.4. Imputando Missing_values KNN
+```{r}
+
+###################################   5.3.1. Imputando miss_values en train_Sf
+Base_imputada <- impute_knn(Base_Bogota, k = 5)
+```
+
+```{r}
+##################################   5.3.2. Revisando los missing_values
+
+skimr::skim(Base_imputada)
+glimpse(Base_imputada)
+str(Base_imputada)
+```
+
+```{r}
+
+##################################   5.3.3. Guardar como archivo GeoJSON
+
+Base_imputada <- Base_imputada %>%
+  rename(PrecioValorizado = PrecioDeflactado)
+
+st_write(Base_imputada, "Base_imputada.geojson", delete_dsn = TRUE)
+```
+
+```{r}
+
+##################################   5.3.5. Cargando archivo Base_imputada.geojson
+
+Base_imputada <- st_read("C:/Users/Juancho/OneDrive/Desktop/MeCA/Big Data y Maching Learning/Taller No. 3/Base_imputada.geojson", quiet = TRUE)
+```
+
+ 
+# ----------------------------------------------------------------------------------------------------------------------------
+#                                                            6. Estadísticas
+# ----------------------------------------------------------------------------------------------------------------------------
+
+###                                          6.1. Creamos Columna Precio Metro Cuadrado
+
+```{r}
+
+#################### 6.1.1. Creamos columna preciom2
+####################        preciom2 = PrecioDeflactado/surface_covered
+
+Base_imputada <- Base_imputada %>%
+  mutate(preciom2 = PrecioValorizado/surface_covered)
+
+skimr::skim(Base_imputada)
+```
+
+######                                      6.2. Estadísticas
+```{r}
+
+######################################  6.2.1. Frecuencia surface_Total
+
+ggplot(Base_imputada, aes(x = factor(surface_total))) +
+  geom_bar(fill = "skyblue", color = "black") +
+  labs(title = "Superficie Total por Grupo de Observaciones",
+       x = "Superficie Total",
+       y = "Frecuencia") +
+  theme_minimal()
+
+######################################  6.2.2. Frecuencia de baños
+
+ggplot(Base_imputada, aes(x = factor(bathrooms))) +
+  geom_bar(fill = "skyblue", color = "black") +
+  labs(title = "Cantidad de Baños por Grupo de Observaciones",
+       x = "Número de Baños",
+       y = "Frecuencia") +
+  theme_minimal()
+
+######################################  6.2.3. Frecuencia de surface_covered
+
+ggplot(Base_imputada, aes(x = factor(surface_covered))) +
+  geom_bar(fill = "skyblue", color = "black") +
+  labs(title = "Superficie Cubierta por Grupo de Observaciones",
+       x = "Superficie Cubierta",
+       y = "Frecuencia") +
+  theme_minimal()
+
+######################################  6.2.4. Frecuencia de precio metro cuadrado
+
+ggplot(Base_imputada, aes(x = factor(preciom2))) +
+  geom_bar(fill = "skyblue", color = "black") +
+  labs(title = "Superficie Cubierta por Grupo de Observaciones",
+       x = "Precio metro Cuadrado",
+       y = "Frecuencia") +
+  theme_minimal()
+
+```
+
+```{r}
+
+hist(Base_imputada$PrecioValorizado)
+hist(Base_imputada$surface_total)
+hist(Base_imputada$surface_covered)
+hist(Base_imputada$preciom2)
+hist(Base_imputada$bathrooms)
+
+summary(Base_imputada)
+```
+
+El argumento skim(), nos permite visualizar que ya no hay valores faltantes en las variables de interés: área cubierta, área total, áreas comunes, habitaciones y baños. Sin embargo, los valroes faltantes que se observan en la variable terraza se atribuyen principalmente a la extracción de texto en la columna de "descripcion". Ahora bien, empleando el argumento summary (), podemos observar algunas estadísticas descriptivas de las variables. Inicialmente llama la atención los valores de área mínima que hay tanto para surface_covered, como también, para surface_total. Se puede atribuir estos valores a errores de digitación en las bases de datos o a un error en la extracción de información en la columna de descripción. Con respecto a los valores máximos, en el caso de las mismas dos variables, puede considerarse que hay casas o apartamentos cuyo fin son para actividades comerciales. Esta idea se puede complementar con la cantidad de máxima de habitaciones, áreas comunes y baños. En el caso de baños, hay que revisar puntualmente la causa de una observación con 2402 baños. Como se ha descrito, muy posiblemente este máximo valor sea por error en la extracción de datos de la columna de descripción. 
+
+Al aplicar summary() en la Base_Chapinero, nos damos cuenta que los baños presentan dos valores atípicos porque hay valores mínimos de un (1) baño y un máximo de (2402) baños. Para verificar la variabilidad en los valores de baños, primero realizamos una tabla de frecuencia de los números de baños, para ello, usamos el argumento ggplot(). La gráfica nos permite ver que efectivamente la mediana se concentra en (3) baños pero también, que hay valores de (12), (15), (25), (32), (45), (312) Y (2402) baños. Conceptualmente, un baño puede tomar valores continuos cuando no cuenta con ducha (baño a medias). Bajo este argumento, se comprende que los valores de (15), (25), (45) serían realmente baños sin ducha. Sin embargo, lo valores de (312) y (2402) corresponden a errores en la extracción de información por la descripción. Por ende, se deciden eliminar los dos valores. Se transforman los baños con valores de (15), (25), (45) a valores continuos (1,5), (2,5) y (4,5).
+
+El histograma de los precios deflactados refleja una campana asimétrica positiva donde la mayor cantidad de valores están concentrados en precios bajos y muy pocos valores a precios altos. Mientras que si analizamos el histograma de precio sin deflactar (PrecioUnificado), se puede visualizar que la asimetría es positiva y una mayor cantidad de viviendas con precios bajos. Para complementar el análisis, se grafica una boxplot.
+
+
+############                    6.3. Función para recodificar bathrooms en un objeto sf ya cargado
+```{r}
+
+
+############################################## 6.3.1. Transformando valores de baños
+
+transform_bathrooms <- function(sf_data) {
+  sf_data %>%
+    mutate(
+      bathrooms = case_when(
+        bathrooms == 15 ~ 1,
+        bathrooms == 25 ~ 2,
+        bathrooms == 35 ~ 3,
+        bathrooms == 45 ~ 4,
+        TRUE            ~ bathrooms
+      )
+    )
+}
+
+
+Base_imputada <- Base_imputada %>%
+  filter(!is.na(tiene_terraza))
+
+Base_imputada <- transform_bathrooms(Base_imputada)
+
+```
+
+# -----------------------------------------------------------------------------------------------------------------------------
+# 7. Eliminando Outliers Bogotá D.C. 
+# -----------------------------------------------------------------------------------------------------------------------------
+
+###                     7.2. FUnción Elimina Outliers (surface_covered, surface_total y precioValorizado)
+```{r}
+# Función para eliminar outliers en múltiples variables
+
+remove_outliers <- function(data, 
+                            vars = c("surface_total", "surface_covered", "PrecioValorizado", "bathrooms", "preciom2"), 
+                            k = 1.5) {
+  
+  df <- data
+  
+  for (v in vars) {
+    # Calcula cuartiles y rango intercuartílico
+    q <- quantile(df[[v]], probs = c(0.25, 0.75), na.rm = TRUE)
+    iqr <- diff(q)
+    
+    lower <- q[1] - k * iqr
+    upper <- q[2] + k * iqr
+    
+    # Filtra filas dentro de los límites
+    df <- df %>%
+      filter(between(.data[[v]], lower, upper))
+  }
+  
+  return(df)
+}
+
+#################################################### Aplicamos la función
+
+Base_limpia <- remove_outliers(Base_imputada)
+
+
+```
+
+###                                      7.3. Grafican Outliers antes y después de función
+### 7.3.1. BoxPlot Baños
+```{r}
+
+
+# 1. Seleccionar y pivotar los datos para comparación
+BoxPlo_Baños <- list(
+  antes  = Base_imputada %>%
+    st_drop_geometry() %>%
+    dplyr::select(bathrooms),
+  despues = Base_limpia  %>% 
+    st_drop_geometry() %>%
+    dplyr::select(bathrooms)
+) %>%
+  bind_rows(.id = "set") %>%
+  pivot_longer(
+    cols = -set,
+    names_to  = "variable",
+    values_to = "valor"
+  )
+
+# 2. Graficar los boxplots comparativos
+ggplot(BoxPlo_Baños, aes(x = variable, y = valor, fill = set)) +
+  geom_boxplot(position = position_dodge(width = 0.8), outlier.shape = 1) +
+  labs(
+    title    = "Boxplots_Baños antes vs. después de remover outliers",
+    x        = "Variable",
+    y        = "Valor",
+    fill     = "Conjunto"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+### 7.3.2. BoxPlot Superficie Cubierta
+```{r}
+
+
+# 1. Seleccionar y pivotar los datos para comparación
+BoxPlo_SurfaceCovered <- list(
+  antes  = Base_imputada %>%
+    st_drop_geometry() %>%
+    dplyr::select(surface_covered),
+  despues = Base_limpia  %>% 
+    st_drop_geometry() %>%
+    dplyr::select(surface_covered)
+) %>%
+  bind_rows(.id = "set") %>%
+  pivot_longer(
+    cols = -set,
+    names_to  = "variable",
+    values_to = "valor"
+  )
+
+# 2. Graficar los boxplots comparativos
+ggplot(BoxPlo_SurfaceCovered, aes(x = variable, y = valor, fill = set)) +
+  geom_boxplot(position = position_dodge(width = 0.8), outlier.shape = 1) +
+  labs(
+    title    = "Boxplots Superficies Cubiertas antes vs. después de remover outliers",
+    x        = "Variable",
+    y        = "Valor",
+    fill     = "Conjunto"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+### 7.3.3. BoxPlot Superficie Total
+```{r}
+
+
+# 1. Seleccionar y pivotar los datos para comparación
+BoxPlo_Total <- list(
+  antes  = Base_imputada %>%
+    st_drop_geometry() %>%
+    dplyr::select(surface_total),
+  despues = Base_limpia  %>% 
+    st_drop_geometry() %>%
+    dplyr::select(surface_total)
+) %>%
+  bind_rows(.id = "set") %>%
+  pivot_longer(
+    cols = -set,
+    names_to  = "variable",
+    values_to = "valor"
+  )
+
+# 2. Graficar los boxplots comparativos
+ggplot(BoxPlo_Total, aes(x = variable, y = valor, fill = set)) +
+  geom_boxplot(position = position_dodge(width = 0.8), outlier.shape = 1) +
+  labs(
+    title    = "Boxplots Superficies Totales antes vs. después de remover outliers",
+    x        = "Variable",
+    y        = "Valor",
+    fill     = "Conjunto"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+### 7.3.4. BoxPlot Precio Valorizado
+```{r}
+
+
+# 1. Seleccionar y pivotar los datos para comparación
+BoxPlo_PrecioValorizado <- list(
+  antes  = Base_imputada %>%
+    st_drop_geometry() %>%
+    dplyr::select(PrecioValorizado),
+  despues = Base_limpia  %>% 
+    st_drop_geometry() %>%
+    dplyr::select(PrecioValorizado)
+) %>%
+  bind_rows(.id = "set") %>%
+  pivot_longer(
+    cols = -set,
+    names_to  = "variable",
+    values_to = "valor"
+  )
+
+# 2. Graficar los boxplots comparativos
+ggplot(BoxPlo_PrecioValorizado, aes(x = variable, y = valor, fill = set)) +
+  geom_boxplot(position = position_dodge(width = 0.8), outlier.shape = 1) +
+  labs(
+    title    = "Boxplots Precios Valorizados antes vs. después de remover outliers",
+    x        = "Variable",
+    y        = "Valor",
+    fill     = "Conjunto"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+### 7.3.5. BoxPlot Precio metro Cuadrado
+```{r}
+
+
+# 1. Seleccionar y pivotar los datos para comparación
+BoxPlo_PrecioM2 <- list(
+  antes  = Base_imputada %>%
+    st_drop_geometry() %>%
+    dplyr::select(preciom2),
+  despues = Base_limpia  %>% 
+    st_drop_geometry() %>%
+    dplyr::select(preciom2)
+) %>%
+  bind_rows(.id = "set") %>%
+  pivot_longer(
+    cols = -set,
+    names_to  = "variable",
+    values_to = "valor"
+  )
+
+# 2. Graficar los boxplots comparativos
+ggplot(BoxPlo_PrecioM2, aes(x = variable, y = valor, fill = set)) +
+  geom_boxplot(position = position_dodge(width = 0.8), outlier.shape = 1) +
+  labs(
+    title    = "Boxplots Precio Metro Cuadrado antes vs. después de remover outliers",
+    x        = "Variable",
+    y        = "Valor",
+    fill     = "Conjunto"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+```{r}
+hist(Base_limpia$PrecioValorizado)
+hist(Base_limpia$surface_total)
+hist(Base_limpia$surface_covered)
+hist(Base_limpia$preciom2)
+hist(Base_limpia$bathrooms)
+```
+
+```{r }
+summary(Base_limpia)
+```
+
+# ----------------------------------------------------------------------------------------------------------------------------
+#                                                           8. Distribución Espacial
+# ----------------------------------------------------------------------------------------------------------------------------
+
+#                                       8.1. Distribución Espacial Precio Valorizado Promedio por UPZ
+```{r}
+
+# Distribución Espacial de Precio Valorizado promedio por UPZ #
+
+UPZ_PrecioValorizado <- Base_limpia %>%
+  st_drop_geometry() %>%
+  group_by(nombre) %>%
+  summarise(precio_promedio = mean(PrecioValorizado, na.rm = TRUE),
+            n = n())
+
+## Unir con las geometrías ##
+Geo_UPZPrecioValorizado <- left_join(upz_bogota, UPZ_PrecioValorizado, by = "nombre")
+
+## Usar este objeto con geometrías en leaflet ##
+leaflet(Geo_UPZPrecioValorizado) %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addPolygons(
+    fillColor = ~colorQuantile("YlOrRd", precio_promedio)(precio_promedio),
+    color = "#444444", weight = 1, fillOpacity = 0.8,
+    popup = ~paste("Barrio:", nombre, "<br>Precio promedio: $", round(precio_promedio, 0))
+  )
+
+```
+
+# #                                       8.2. Distribución Espacial Completo
+```{r}
+
+# Tu código original
+UPZ_Completo <- Base_limpia %>%
+  st_drop_geometry() %>%
+  group_by(nombre, property_type) %>%
+  summarise(precio_promedio = mean(PrecioValorizado, na.rm = TRUE),
+            surface_covered_prom = mean(surface_covered, na.rm = TRUE),
+            preciom2_prom = mean(preciom2, na.rm = TRUE),
+            n = n())
+
+# Unir con las geometrías
+Geo_Completo <- left_join(upz_bogota, UPZ_Completo, by = "nombre")
+
+# Filtrar solo para Casa y Apartamento
+Geo_Casa_Apartamento <- Geo_Completo %>%
+  filter(property_type %in% c("Casa", "Apartamento")) %>%
+  filter(!is.na(precio_promedio))
+
+# Crear paleta de colores para el precio promedio
+pal_precio <- colorNumeric(
+  palette = "Spectral",
+  domain = Geo_Casa_Apartamento$precio_promedio,
+  na.color = "transparent",
+  reverse = TRUE
+)
+
+# Crear paleta de colores específica para Casa y Apartamento
+colores_property <- c("Casa" = "#FF6B6B", 
+                     "Apartamento" = "#4ECDC4")
+
+pal_property <- colorFactor(
+  palette = colores_property,
+  domain = c("Casa", "Apartamento")
+)
+
+# Crear etiquetas emergentes (popups) más detalladas
+labels <- sprintf(
+  "<div style='font-size: 14px;'>
+   <strong style='color: #2E86AB; font-size: 16px;'>%s</strong><br/>
+   <strong style='color: %s;'>🏠 %s</strong><br/>
+   <hr style='margin: 5px 0;'>
+   💰 <strong>Precio Promedio:</strong> $%s<br/>
+   📐 <strong>Superficie Promedio:</strong> %.1f m²<br/>
+   💵 <strong>Precio por m²:</strong> $%s<br/>
+   📊 <strong>Propiedades:</strong> %d
+   </div>",
+  Geo_Casa_Apartamento$nombre,
+  ifelse(Geo_Casa_Apartamento$property_type == "Casa", "#FF6B6B", "#4ECDC4"),
+  Geo_Casa_Apartamento$property_type,
+  format(round(Geo_Casa_Apartamento$precio_promedio, 0), big.mark = ",", scientific = FALSE),
+  round(Geo_Casa_Apartamento$surface_covered_prom, 1),
+  format(round(Geo_Casa_Apartamento$preciom2_prom, 0), big.mark = ",", scientific = FALSE),
+  Geo_Casa_Apartamento$n
+) %>% lapply(htmltools::HTML)
+
+# Separar datos por tipo de propiedad para capas independientes
+Geo_Casas <- Geo_Casa_Apartamento %>% filter(property_type == "Casa")
+Geo_Apartamentos <- Geo_Casa_Apartamento %>% filter(property_type == "Apartamento")
+
+# Crear el mapa interactivo
+mapa_casa_apartamento <- leaflet() %>%
+  addTiles(group = "OpenStreetMap") %>%
+  addProviderTiles(providers$CartoDB.Positron, group = "CartoDB") %>%
+  
+  # Capa de Casas coloreada por precio
+  addPolygons(
+    data = Geo_Casas,
+    fillColor = ~pal_precio(precio_promedio),
+    weight = 2,
+    opacity = 1,
+    color = "#FF6B6B",
+    dashArray = "3",
+    fillOpacity = 0.7,
+    highlight = highlightOptions(
+      weight = 4,
+      color = "#FF6B6B",
+      dashArray = "",
+      fillOpacity = 0.9,
+      bringToFront = TRUE
+    ),
+    popup = labels[Geo_Casa_Apartamento$property_type == "Casa"],
+    group = "🏠 Casas"
+  ) %>%
+  
+  # Capa de Apartamentos coloreada por precio
+  addPolygons(
+    data = Geo_Apartamentos,
+    fillColor = ~pal_precio(precio_promedio),
+    weight = 2,
+    opacity = 1,
+    color = "#4ECDC4",
+    dashArray = "3",
+    fillOpacity = 0.7,
+    highlight = highlightOptions(
+      weight = 4,
+      color = "#4ECDC4",
+      dashArray = "",
+      fillOpacity = 0.9,
+      bringToFront = TRUE
+    ),
+    popup = labels[Geo_Casa_Apartamento$property_type == "Apartamento"],
+    group = "🏢 Apartamentos"
+  ) %>%
+  
+  # Capa combinada coloreada por tipo de propiedad
+  addPolygons(
+    data = Geo_Casa_Apartamento,
+    fillColor = ~pal_property(property_type),
+    weight = 1.5,
+    opacity = 1,
+    color = "white",
+    dashArray = "2",
+    fillOpacity = 0.8,
+    highlight = highlightOptions(
+      weight = 3,
+      color = "#666",
+      dashArray = "",
+      fillOpacity = 0.9,
+      bringToFront = TRUE
+    ),
+    popup = labels,
+    group = "🏠🏢 Comparación"
+  ) %>%
+  
+  # Agregar leyenda para precios
+  addLegend(
+    pal = pal_precio, 
+    values = Geo_Casa_Apartamento$precio_promedio,
+    opacity = 0.8, 
+    title = htmltools::HTML("Precio Promedio<br/>(Millones COP)"),
+    position = "bottomright",
+    group = "Leyenda Precio"
+  ) %>%
+  
+  # Agregar leyenda para tipos de propiedad
+  addLegend(
+    colors = c("#FF6B6B", "#4ECDC4"),
+    labels = c("🏠 Casa", "🏢 Apartamento"),
+    opacity = 0.8,
+    title = "Tipo de Propiedad",
+    position = "bottomleft"
+  ) %>%
+  
+  # Control de capas
+  addLayersControl(
+    baseGroups = c("OpenStreetMap", "CartoDB"),
+    overlayGroups = c("🏠 Casas", "🏢 Apartamentos", "🏠🏢 Comparación"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  
+  # Configurar vista inicial en Bogotá
+  setView(lng = -74.08, lat = 4.60, zoom = 11) %>%
+  
+  # Ocultar inicialmente las capas individuales
+  hideGroup(c("🏠🏢 Comparación"))
+
+# Mostrar el mapa
+mapa_casa_apartamento
+
+```
+
+#                                               8.3. Graficando por tipo de propiedad en Bogotá
+```{r}
+
+Base_limpia %>%
+  st_drop_geometry() %>%
+  group_by(property_type) %>%
+  summarise(PrecioValorizado_prom = mean(PrecioValorizado, na.rm = TRUE)) %>%
+  ggplot(aes(x = reorder(property_type, -PrecioValorizado_prom), y = PrecioValorizado_prom)) +
+  geom_bar(stat = "identity", fill = "darkgreen", alpha = 0.7) +
+  geom_text(aes(label = scales::comma(round(PrecioValorizado_prom, 0))),
+            vjust = 1.5, color = "white", size = 4) +  # Texto dentro de la barra
+  labs(title = "Precio Valorizado Promedio por Tipo de Propiedad en Bogotá",
+       x = "Tipo de Propiedad", y = "Precio Valorizado Promedio") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+```
+
+
+#                                                        8.4.  Matriz de Correlaciones
+```{r}
+
+variables <- Base_limpia %>%
+  st_drop_geometry() %>%
+  dplyr::select(PrecioValorizado, bathrooms, bedrooms, rooms, surface_total, surface_covered, preciom2, tiene_terraza, distancia_parque, distancia_hospital, num_restaurantes_700m, dist_to_tm, dist_to_cai)
+
+# Calcular matriz de correlación
+matriz_CorrLimpia <- cor(variables, use = "complete.obs")
+
+# Visualizar correlación con ggcorrplot
+ggcorrplot(matriz_CorrLimpia, 
+           hc.order = TRUE, 
+           type = "lower",
+           lab = TRUE, 
+           colors = c("blue", "white", "red"),
+           title = "Matriz de Correlación Chapinero")
+
+# Visualizar la matriz de correlación
+corrplot(matriz_CorrLimpia, 
+         method = "color",       # Tipo de visualización
+         col = colorRampPalette(c("blue", "white", "red"))(200),
+         type = "upper",         # Solo triángulo superior
+         tl.col = "black",       # Color de etiquetas
+         tl.cex = 0.9,           # Tamaño de texto
+         number.cex = 0.7,       # Tamaño de números
+         addCoef.col = "black")  # Añadir valores numéricos
+
+
+# Tercera opción para visualizar matriz de correlación
+heatmap(matriz_CorrLimpia, 
+        main = "Mapa de Calor - Matriz de Correlación",
+        col = colorRampPalette(c("blue", "white", "red"))(100), 
+        scale = "none")
+```
+
+
+
+# ----------------------------------------------------------------------------------------------------------------------------
+#                                                   9. CARLOS
+# ----------------------------------------------------------------------------------------------------------------------------
+
+
+#                                           9.1. Seleccionar Variables
+
+```{r}
+library(keras)
+
+db <- Base_limpia %>% 
+  dplyr::select(property_type,dist_to_tm,num_restaurantes_700m,near_cai,tiene_terraza,surface_covered, bathrooms, bedrooms, rooms, PrecioValorizado, distancia_parque, distancia_hospital, dist_to_cai, origen, nombre, codigo_upz, codigo_localidad)
+```
+
+#                                9.2. test (Chapinero) y train (Diferente a Chapinero)
+```{r}
+
+# Seleccionamos las UPZ que son similares en Precio Valorizado
+
+db <- db %>% 
+  filter(nombre == "CHAPINERO",
+         nombre == "CHICO LAGO",
+         nombre == "PARDO RUBIO",
+         nombre == "EL REFUGIO",
+         nombre == "TEUSAQUILLO",
+         nombre == "CIUDAD SALITRE ORIENTAL",
+         nombre == "MODELIA",
+         nombre == "CIUDAD SALITRE OCCIDENTAL",
+         nombre == "JARDIN BOTANICO",
+         nombre == "SANTA BARBARA",
+         nombre == "COUNTRY CLUB",
+         nombre == "USAQUEN",
+         nombre == "LOS ANDES",
+         nombre == "LOS ALCAZARES"
+  )
+
+# Definimos test
+
+val_set <- db %>%
+  filter(origen == "test")
+
+
+# Definimos train
+
+train <- db %>%
+  filter(origen == "train")
+
+```
+
+#                                               9.3. PREPROSSES DATA FOR KERAS
+```{r}
+
+str(train)
+
+###                                                    Para train
+
+train <- train %>%
+  mutate(tiene_terraza = ifelse(is.na(tiene_terraza), 
+                                0,  
+                                tiene_terraza))
+
+train <- train %>% 
+  st_drop_geometry() %>%
+  dplyr::select(-codigo_localidad,
+                -origen,              # para evitar tener problemas con caret son de tipo <chr>
+                -nombre,
+                -property_type,
+                -codigo_upz
+  )
+
+dmy <- caret::dummyVars(
+  ~ .,
+  data = train,
+  sep = "_", # Separador para las variables dummy
+  drop = TRUE,
+  fullRank = TRUE # Evitar la multicolinealidad
+)
+
+train <- as.data.frame(predict(dmy, newdata = train))
+
+X_train <- train %>% dplyr::select(-PrecioValorizado)
+y_train <- train$PrecioValorizado
+
+X_train <- as.matrix(train %>% dplyr::select(-PrecioValorizado))
+y_train <- as.matrix(train$PrecioValorizado)
+
+###                                                Para test
+
+val_set <- val_set %>% 
+  st_drop_geometry() %>%
+  dplyr::select(-codigo_localidad,
+                -origen,              # para evitar tener problemas con caret son de tipo <chr>
+                -nombre,
+                -property_type,
+                -codigo_upz
+  )
+
+dmy2 <- caret::dummyVars(
+  ~ .,
+  data = val_set,
+  sep = "_", # Separador para las variables dummy
+  drop = TRUE,
+  fullRank = TRUE # Evitar la multicolinealidad
+)
+
+val_set <- as.data.frame(predict(dmy2, newdata = val_set))
+
+X_test <- as.matrix(val_set %>% dplyr::select(-PrecioValorizado))
+y_test <- as.matrix(val_set$PrecioValorizado)
+```
+
+#                                              9.4. Keras Model Definition Function
+```{r}
+
+```
+
+
+
+
+
+
+
+
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{}
+
+```
